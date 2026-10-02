@@ -3414,6 +3414,9 @@ func bytesString(b []byte) string {
 }
 
 func revSquash(json string) string {
+	if len(json) == 0 {
+		return ""
+	}
 	// reverse squash
 	// expects that the tail character is a ']' or '}' or ')' or '"'
 	// squash the value, ignoring all nested arrays and objects.
@@ -3528,9 +3531,18 @@ func (t Result) Path(json string) string {
 				}
 				break
 			}
+			if i < 0 {
+				goto fail
+			}
 			raw := revSquash(json[:i+1])
+			if len(raw) == 0 {
+				goto fail
+			}
 			i = i - len(raw)
 			comps = append(comps, raw)
+			if i < 0 {
+				goto fail
+			}
 			// key gotten, now squash the rest
 			raw = revSquash(json[:i+1])
 			i = i - len(raw)

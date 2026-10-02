@@ -200,7 +200,15 @@ func TestPath(t *testing.T) {
 	get("loggy.programmers.2.email")
 	get("lastly.end\\.\\.\\.ing")
 	get("lastly.yay")
+}
 
+func TestPathMalformedJSON(t *testing.T) {
+	doc := `{"b:"2}`
+	r := Get(doc, "b:")
+	p := r.Path(doc)
+	if p != "" {
+		t.Fatalf("expected empty path on malformed JSON, got %q", p)
+	}
 }
 
 func TestTimeResult(t *testing.T) {
