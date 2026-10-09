@@ -989,7 +989,7 @@ right:
 
 // peek at the next byte and see if it's a '@', '[', or '{'.
 func isDotPiperChar(s string) bool {
-	if modifiersAreDisabled {
+	if modifiersAreDisabled() {
 		return false
 	}
 	c := s[0]
@@ -2072,6 +2072,17 @@ func SetEscapeHTML(escapeHTML bool) {
 	disableEscapeHTML.Store(!escapeHTML)
 }
 
+// SetDisableEscapeHTML disables or enables the automatic escaping of certain
+// HTML characters when encoding to JSON.
+func SetDisableEscapeHTML(disabled bool) {
+	disableEscapeHTML.Store(disabled)
+}
+
+// EscapeHTMLDisabled reports whether HTML escaping is currently disabled.
+func EscapeHTMLDisabled() bool {
+	return disableEscapeHTML.Load()
+}
+
 func escapeHTML() bool {
 	return !disableEscapeHTML.Load()
 }
@@ -2176,12 +2187,12 @@ type parseContext struct {
 // use the Valid function first.
 func Get(json, path string) Result {
 	if len(path) > 1 {
-		if (path[0] == '@' && !modifiersAreDisabled) || path[0] == '!' {
+		if (path[0] == '@' && !modifiersAreDisabled()) || path[0] == '!' {
 			// possible modifier
 			var ok bool
 			var npath string
 			var rjson string
-			if path[0] == '@' && !modifiersAreDisabled {
+			if path[0] == '@' && !modifiersAreDisabled() {
 				npath, rjson, ok = execModifier(json, path)
 			} else if path[0] == '!' {
 				npath, rjson, ok = execStatic(path)
@@ -2972,19 +2983,44 @@ func unwrap(json string) string {
 	return json
 }
 
-// Deprecated: Modifiers can no longer be disabled at runtime. To disable
-// modifiers use the build flag:
+// Deprecated: Modifiers can no longer be disabled via this global variable.
+// Use SetModifiers() or SetDisableModifiers() instead. Modifiers can also
+// be disabled at compile time using the build flag:
 //
 //	-ldflags="-X 'github.com/tidwall/gjson.disableModifiers=true'"
 var DisableModifiers = false
-var disableModifiers = "false"                        // ldflag ("true")
-var modifiersAreDisabled = disableModifiers == "true" // usable feature bool
+var disableModifiers = "false" // ldflag ("true")
+var modifiersDisabled atomic.Bool
+
+// SetModifiers enables or disables the modifier syntax.
+// It is safe to call concurrently with Get, Result.Path, and other operations.
+func SetModifiers(modifiers bool) {
+	modifiersDisabled.Store(!modifiers)
+}
+
+// SetDisableModifiers disables or enables the modifier syntax.
+// It is safe to call concurrently with Get, Result.Path, and other operations.
+func SetDisableModifiers(disabled bool) {
+	modifiersDisabled.Store(disabled)
+}
+
+// ModifiersDisabled reports whether modifier syntax is disabled.
+func ModifiersDisabled() bool {
+	return modifiersDisabled.Load()
+}
+
+func modifiersAreDisabled() bool {
+	return modifiersDisabled.Load()
+}
 
 var stockModifiers map[string]func(json, arg string) string
 var userModifiers map[string]func(json, arg string) string
 var userModifiersLock sync.RWMutex
 
 func init() {
+	if disableModifiers == "true" {
+		modifiersDisabled.Store(true)
+	}
 	stockModifiers = map[string]func(json, arg string) string{
 		"pretty":  modPretty,
 		"ugly":    modUgly,
@@ -3617,7 +3653,7 @@ func (t Result) Path(json string) string {
 		}
 	}
 	if len(comps) == 0 {
-		if modifiersAreDisabled {
+		if modifiersAreDisabled() {
 			goto fail
 		}
 		return "@this"

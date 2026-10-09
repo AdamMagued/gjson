@@ -10,6 +10,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -2833,3 +2834,145 @@ func TestPathRev(t *testing.T) {
 	// Does not matter the result. Must not panic.
 	Get(doc, "b:").Path(doc)
 }
+
+func restoreGlobalFlags() {
+	SetEscapeHTML(true)
+	SetModifiers(true)
+}
+
+func TestGlobalFlagSetters(t *testing.T) {
+	defer restoreGlobalFlags()
+	if EscapeHTMLDisabled() || ModifiersDisabled() {
+		t.Fatal("flags must default to false")
+	}
+
+	escaped := string(AppendJSONString(nil, "<&>"))
+	if escaped != "\"\\u003c\\u0026\\u003e\"" {
+		t.Fatalf("escape enabled: got %s", escaped)
+	}
+
+	SetEscapeHTML(false)
+	if !EscapeHTMLDisabled() {
+		t.Fatal("EscapeHTMLDisabled after SetEscapeHTML(false)")
+	}
+	if got := string(AppendJSONString(nil, "<&>")); got != `"<&>"` {
+		t.Fatalf("escape disabled: got %s", got)
+	}
+
+	SetDisableEscapeHTML(false)
+	if EscapeHTMLDisabled() {
+		t.Fatal("EscapeHTMLDisabled after SetDisableEscapeHTML(false)")
+	}
+	if got := string(AppendJSONString(nil, "<&>")); got != "\"\\u003c\\u0026\\u003e\"" {
+		t.Fatalf("escape enabled: got %s", got)
+	}
+
+	SetDisableEscapeHTML(true)
+	if !EscapeHTMLDisabled() {
+		t.Fatal("EscapeHTMLDisabled after SetDisableEscapeHTML(true)")
+	}
+	if got := string(AppendJSONString(nil, "<&>")); got != `"<&>"` {
+		t.Fatalf("escape disabled: got %s", got)
+	}
+
+	SetEscapeHTML(true)
+	if EscapeHTMLDisabled() {
+		t.Fatal("EscapeHTMLDisabled after SetEscapeHTML(true)")
+	}
+
+	json := `{"a":1}`
+	want := string(pretty.Pretty([]byte(json)))
+	if got := Get(json, "@pretty").Raw; got != want {
+		t.Fatalf("modifier enabled: got %s", got)
+	}
+	if got := Parse(json).Path(json); got != "@this" {
+		t.Fatalf("Path with modifiers enabled: got %q", got)
+	}
+
+	SetModifiers(false)
+	if !ModifiersDisabled() {
+		t.Fatal("ModifiersDisabled after SetModifiers(false)")
+	}
+	if Get(json, "@pretty").Exists() {
+		t.Fatal("@pretty ran while modifiers were disabled")
+	}
+	if got := Parse(json).Path(json); got != "" {
+		t.Fatalf("Path with modifiers disabled: got %q", got)
+	}
+	// isDotPiperChar must treat ".@pretty" as a literal key when modifiers are off.
+	if got := Get(`{"a":{"@pretty":7}}`, "a.@pretty").Int(); got != 7 {
+		t.Fatalf("literal @pretty key: got %d", got)
+	}
+
+	SetDisableModifiers(false)
+	if ModifiersDisabled() {
+		t.Fatal("ModifiersDisabled after SetDisableModifiers(false)")
+	}
+	if got := Get(json, "@pretty").Raw; got != want {
+		t.Fatalf("modifier re-enabled: got %s", got)
+	}
+
+	SetDisableModifiers(true)
+	if !ModifiersDisabled() {
+		t.Fatal("ModifiersDisabled after SetDisableModifiers(true)")
+	}
+	if Get(json, "@pretty").Exists() {
+		t.Fatal("@pretty ran while modifiers were disabled")
+	}
+
+	SetModifiers(true)
+	if ModifiersDisabled() {
+		t.Fatal("ModifiersDisabled after SetModifiers(true)")
+	}
+}
+
+func TestGlobalFlagConcurrentSetters(t *testing.T) {
+	defer restoreGlobalFlags()
+	const n = 10000
+	var wg sync.WaitGroup
+	wg.Add(4)
+
+	go func() {
+		defer wg.Done()
+		for i := 0; i < n; i++ {
+			if i%2 == 0 {
+				SetModifiers(true)
+			} else {
+				SetDisableModifiers(true)
+			}
+		}
+	}()
+
+	go func() {
+		defer wg.Done()
+		for i := 0; i < n; i++ {
+			if i%2 == 0 {
+				SetEscapeHTML(true)
+			} else {
+				SetDisableEscapeHTML(true)
+			}
+		}
+	}()
+
+	go func() {
+		defer wg.Done()
+		json := `{"a":"<x>"}`
+		for i := 0; i < n; i++ {
+			_ = Get(json, "@pretty")
+			_ = Get(json, "a.@pretty")
+			_ = Parse(json).Path(json)
+			_ = ModifiersDisabled()
+		}
+	}()
+
+	go func() {
+		defer wg.Done()
+		for i := 0; i < n; i++ {
+			_ = AppendJSONString(nil, "<&>")
+			_ = EscapeHTMLDisabled()
+		}
+	}()
+
+	wg.Wait()
+}
+
