@@ -1330,6 +1330,146 @@ func TestDuplicateKeys(t *testing.T) {
 	if !Valid(json) {
 		t.Fatal("should be valid")
 	}
+
+	// ForEach aligns with Get and Map: only the first occurrence is yielded.
+	var feCount int
+	var feVal string
+	Parse(json).ForEach(func(key, value Result) bool {
+		feCount++
+		feVal = value.String()
+		return true
+	})
+	if feCount != 1 || feVal != "Alex" {
+		t.Fatalf("ForEach expected 1 item with value 'Alex', got %d with value '%s'", feCount, feVal)
+	}
+
+	// Issue 393 reproducer
+	reproJSON := `{"a":1,"a":2}`
+	var reproKeys, reproVals []string
+	Parse(reproJSON).ForEach(func(key, value Result) bool {
+		reproKeys = append(reproKeys, key.String())
+		reproVals = append(reproVals, value.Raw)
+		return true
+	})
+	if len(reproKeys) != 1 || reproKeys[0] != "a" || reproVals[0] != "1" {
+		t.Fatalf("ForEach on %s produced keys=%v vals=%v", reproJSON, reproKeys, reproVals)
+	}
+	if Get(reproJSON, "a").Raw != "1" {
+		t.Fatalf("Get on %s produced %s", reproJSON, Get(reproJSON, "a").Raw)
+	}
+
+	// Multiple duplicates and unique keys
+	multiJSON := `{"a":1,"b":2,"a":3,"c":4,"b":5}`
+	var multiKeys, multiVals []string
+	Parse(multiJSON).ForEach(func(key, value Result) bool {
+		multiKeys = append(multiKeys, key.String())
+		multiVals = append(multiVals, value.Raw)
+		return true
+	})
+	if len(multiKeys) != 3 || multiKeys[0] != "a" || multiKeys[1] != "b" || multiKeys[2] != "c" {
+		t.Fatalf("ForEach multi keys expected [a b c], got %v", multiKeys)
+	}
+	if multiVals[0] != "1" || multiVals[1] != "2" || multiVals[2] != "4" {
+		t.Fatalf("ForEach multi vals expected [1 2 4], got %v", multiVals)
+	}
+
+	// Triplicate keys
+	triJSON := `{"x":1,"x":2,"x":3}`
+	var triCount int
+	Parse(triJSON).ForEach(func(key, value Result) bool {
+		triCount++
+		if value.Raw != "1" {
+			t.Fatalf("expected value '1', got '%s'", value.Raw)
+		}
+		return true
+	})
+	if triCount != 1 {
+		t.Fatalf("expected 1 item, got %d", triCount)
+	}
+
+	// Escaped unicode duplicate key
+	escJSON := `{"\u0061":1,"a":2}`
+	var escCount int
+	var escVal string
+	Parse(escJSON).ForEach(func(key, value Result) bool {
+		escCount++
+		escVal = value.Raw
+		return true
+	})
+	if escCount != 1 || escVal != "1" {
+		t.Fatalf("expected 1 item with value '1', got %d with value '%s'", escCount, escVal)
+	}
+
+	// Early return stops iteration
+	var earlyCount int
+	Parse(multiJSON).ForEach(func(key, value Result) bool {
+		earlyCount++
+		return false
+	})
+	if earlyCount != 1 {
+		t.Fatalf("expected early termination count 1, got %d", earlyCount)
+	}
+
+	// Object with > 16 keys switching from stack array to heap map
+	var b strings.Builder
+	b.WriteString("{")
+	for i := 0; i < 25; i++ {
+		if i > 0 {
+			b.WriteString(",")
+		}
+		fmt.Fprintf(&b, `"k%d":%d`, i, i)
+	}
+	// duplicate earlier keys (< 16) and later keys (>= 16)
+	b.WriteString(`,"k0":999,"k5":999,"k15":999,"k16":999,"k24":999}`)
+	largeJSON := b.String()
+	var largeCount int
+	Parse(largeJSON).ForEach(func(key, value Result) bool {
+		expectedVal := strings.TrimPrefix(key.String(), "k")
+		if value.Raw != expectedVal {
+			t.Fatalf("key %s expected value %s, got %s", key.String(), expectedVal, value.Raw)
+		}
+		largeCount++
+		return true
+	})
+	if largeCount != 25 {
+		t.Fatalf("expected 25 unique keys, got %d", largeCount)
+	}
+
+	// Nested object with duplicate keys
+	nestedJSON := `{"nested":{"k":1,"k":2},"k":3}`
+	var nestedRootKeys []string
+	Parse(nestedJSON).ForEach(func(key, value Result) bool {
+		nestedRootKeys = append(nestedRootKeys, key.String())
+		return true
+	})
+	if len(nestedRootKeys) != 2 || nestedRootKeys[0] != "nested" || nestedRootKeys[1] != "k" {
+		t.Fatalf("expected nested root keys [nested k], got %v", nestedRootKeys)
+	}
+	var childVals []string
+	Get(nestedJSON, "nested").ForEach(func(key, value Result) bool {
+		childVals = append(childVals, value.Raw)
+		return true
+	})
+	if len(childVals) != 1 || childVals[0] != "1" {
+		t.Fatalf("expected childVals [1], got %v", childVals)
+	}
+
+	// Iterators All, Keys, Values
+	iterJSON := `{"a":1,"a":2,"b":3}`
+	var iterKeys []string
+	for k := range Parse(iterJSON).Keys() {
+		iterKeys = append(iterKeys, k.String())
+	}
+	if len(iterKeys) != 2 || iterKeys[0] != "a" || iterKeys[1] != "b" {
+		t.Fatalf("expected Keys [a b], got %v", iterKeys)
+	}
+	var iterVals []int64
+	for v := range Parse(iterJSON).Values() {
+		iterVals = append(iterVals, v.Int())
+	}
+	if len(iterVals) != 2 || iterVals[0] != 1 || iterVals[1] != 3 {
+		t.Fatalf("expected Values [1 3], got %v", iterVals)
+	}
 }
 
 func TestArrayValues(t *testing.T) {

@@ -264,10 +264,16 @@ func (t Result) IsBool() bool {
 // ForEach iterates through values.
 // If the result represents a non-existent value, then no values will be
 // iterated. If the result is an Object, the iterator will pass the key and
-// value of each item. If the result is an Array, the iterator will only pass
-// the value of each item. If the result is not a JSON array or object, the
-// iterator will pass back one value equal to the result.
+// value of each item. If an object contains duplicate keys, only the first
+// occurrence is yielded, consistent with Get and Map. If the result is an
+// Array, the iterator will only pass the value of each item. If the result
+// is not a JSON array or object, the iterator will pass back one value equal
+// to the result.
 func (t Result) ForEach(iterator func(key, value Result) bool) {
+	t.forEach(iterator, true)
+}
+
+func (t Result) forEach(iterator func(key, value Result) bool, dedupe bool) {
 	if !t.Exists() {
 		return
 	}
@@ -299,7 +305,11 @@ func (t Result) ForEach(iterator func(key, value Result) bool) {
 	var vesc bool
 	var ok bool
 	var idx int
+	var stackKeys [16]string
+	var heapKeys map[string]struct{}
+	var numKeys int
 	for ; i < len(json); i++ {
+		var duplicate bool
 		if obj {
 			if json[i] != '"' {
 				continue
@@ -316,6 +326,32 @@ func (t Result) ForEach(iterator func(key, value Result) bool) {
 			}
 			key.Raw = str
 			key.Index = s + t.Index
+			if dedupe {
+				if numKeys < len(stackKeys) {
+					for k := 0; k < numKeys; k++ {
+						if stackKeys[k] == key.Str {
+							duplicate = true
+							break
+						}
+					}
+					if !duplicate {
+						stackKeys[numKeys] = key.Str
+						numKeys++
+					}
+				} else {
+					if heapKeys == nil {
+						heapKeys = make(map[string]struct{}, 32)
+						for k := 0; k < len(stackKeys); k++ {
+							heapKeys[stackKeys[k]] = struct{}{}
+						}
+					}
+					if _, ok := heapKeys[key.Str]; ok {
+						duplicate = true
+					} else {
+						heapKeys[key.Str] = struct{}{}
+					}
+				}
+			}
 		} else {
 			key.Num += 1
 		}
@@ -337,8 +373,10 @@ func (t Result) ForEach(iterator func(key, value Result) bool) {
 		} else {
 			value.Index = s + t.Index
 		}
-		if !iterator(key, value) {
-			return
+		if !duplicate {
+			if !iterator(key, value) {
+				return
+			}
 		}
 		idx++
 	}
@@ -3115,10 +3153,10 @@ func modReverse(json, arg string) string {
 	}
 	if res.IsObject() {
 		var keyValues []Result
-		res.ForEach(func(key, value Result) bool {
+		res.forEach(func(key, value Result) bool {
 			keyValues = append(keyValues, key, value)
 			return true
-		})
+		}, false)
 		out := make([]byte, 0, len(json))
 		out = append(out, '{')
 		for i, j := len(keyValues)-2, 0; i >= 0; i, j = i-2, j+1 {
