@@ -805,6 +805,7 @@ type arrayPathResult struct {
 		path  string
 		op    string
 		value string
+		expr  *queryExpr
 	}
 }
 
@@ -837,22 +838,17 @@ func parseArrayPath(path string) (r arrayPathResult) {
 				} else if path[1] == '[' || path[1] == '(' {
 					// query
 					r.query.on = true
-					qpath, op, value, _, fi, vesc, ok :=
-						parseQuery(path[i:])
+					expr, fi, ok := parseFullQuery(path[i:])
 					if !ok {
 						// bad query, end now
 						break
 					}
-					if len(value) >= 2 && value[0] == '"' &&
-						value[len(value)-1] == '"' {
-						value = value[1 : len(value)-1]
-						if vesc {
-							value = unescape(value)
-						}
+					r.query.expr = expr
+					if expr != nil && expr.op == queryOpNone {
+						r.query.path = expr.cond.path
+						r.query.op = expr.cond.op
+						r.query.value = expr.cond.value
 					}
-					r.query.path = qpath
-					r.query.op = op
-					r.query.value = value
 
 					i = fi - 1
 					if i+1 < len(path) && path[i+1] == '#' {
@@ -971,6 +967,308 @@ func parseQuery(query string) (
 		remain = query[i+1:]
 	}
 	return path, op, value, remain, i + 1, vesc, true
+}
+
+type queryOp int
+
+const (
+	queryOpNone queryOp = iota
+	queryOpAnd
+	queryOpOr
+)
+
+type queryCond struct {
+	path  string
+	op    string
+	value string
+}
+
+type queryExpr struct {
+	op    queryOp
+	cond  queryCond
+	left  *queryExpr
+	right *queryExpr
+}
+
+func (e *queryExpr) eval(qval Result) bool {
+	if e == nil {
+		return false
+	}
+	switch e.op {
+	case queryOpAnd:
+		return e.left.eval(qval) && e.right.eval(qval)
+	case queryOpOr:
+		return e.left.eval(qval) || e.right.eval(qval)
+	default:
+		return evalQueryCondition(&e.cond, qval)
+	}
+}
+
+func evalQueryCondition(c *queryCond, qval Result) bool {
+	var res Result
+	if qval.Type == JSON {
+		if c.path == "" {
+			return false
+		}
+		res = qval.Get(c.path)
+	} else {
+		if c.path != "" {
+			return false
+		}
+		res = qval
+	}
+	return matchCondition(c, res)
+}
+
+func parseFullQuery(query string) (expr *queryExpr, fi int, ok bool) {
+	if len(query) < 2 || query[0] != '#' ||
+		(query[1] != '(' && query[1] != '[') {
+		return nil, 0, false
+	}
+	closeChar := byte(')')
+	if query[1] == '[' {
+		closeChar = ']'
+	}
+	i := 2
+	depth := 1
+	for ; i < len(query); i++ {
+		if query[i] == '\\' {
+			i++
+		} else if query[i] == '[' || query[i] == '(' {
+			depth++
+		} else if query[i] == ']' || query[i] == ')' {
+			depth--
+			if depth == 0 {
+				break
+			}
+		} else if query[i] == '"' {
+			i++
+			for ; i < len(query); i++ {
+				if query[i] == '\\' {
+					i++
+				} else if query[i] == '"' {
+					break
+				}
+			}
+		}
+	}
+	if depth > 0 || i >= len(query) || query[i] != closeChar {
+		return nil, 0, false
+	}
+	expr, ok = parseQueryExpr(query[2:i])
+	if !ok {
+		return nil, 0, false
+	}
+	return expr, i + 1, true
+}
+
+func findTopLevelOp(s string, op string) int {
+	depth := 0
+	for i := 0; i < len(s); i++ {
+		if depth == 0 && i+len(op) <= len(s) && s[i:i+len(op)] == op {
+			return i
+		}
+		if s[i] == '\\' {
+			i++
+		} else if s[i] == '(' || s[i] == '[' {
+			depth++
+		} else if s[i] == ')' || s[i] == ']' {
+			if depth > 0 {
+				depth--
+			}
+		} else if s[i] == '"' {
+			i++
+			for ; i < len(s); i++ {
+				if s[i] == '\\' {
+					i++
+				} else if s[i] == '"' {
+					break
+				}
+			}
+		}
+	}
+	return -1
+}
+
+func parseQueryExpr(s string) (*queryExpr, bool) {
+	s = trim(s)
+	if s == "" {
+		return nil, false
+	}
+	return parseOrExpr(s)
+}
+
+func parseOrExpr(s string) (*queryExpr, bool) {
+	s = trim(s)
+	if s == "" {
+		return nil, false
+	}
+	idx := findTopLevelOp(s, "||")
+	if idx >= 0 {
+		left, ok := parseAndExpr(s[:idx])
+		if !ok {
+			return nil, false
+		}
+		right, ok := parseOrExpr(s[idx+2:])
+		if !ok {
+			return nil, false
+		}
+		return &queryExpr{
+			op:    queryOpOr,
+			left:  left,
+			right: right,
+		}, true
+	}
+	return parseAndExpr(s)
+}
+
+func parseAndExpr(s string) (*queryExpr, bool) {
+	s = trim(s)
+	if s == "" {
+		return nil, false
+	}
+	idx := findTopLevelOp(s, "&&")
+	if idx >= 0 {
+		left, ok := parsePrimaryExpr(s[:idx])
+		if !ok {
+			return nil, false
+		}
+		right, ok := parseAndExpr(s[idx+2:])
+		if !ok {
+			return nil, false
+		}
+		return &queryExpr{
+			op:    queryOpAnd,
+			left:  left,
+			right: right,
+		}, true
+	}
+	return parsePrimaryExpr(s)
+}
+
+func parsePrimaryExpr(s string) (*queryExpr, bool) {
+	s = trim(s)
+	if s == "" {
+		return nil, false
+	}
+	if s[0] == '(' {
+		depth := 1
+		i := 1
+		for ; i < len(s); i++ {
+			if s[i] == '\\' {
+				i++
+			} else if s[i] == '(' || s[i] == '[' {
+				depth++
+			} else if s[i] == ')' || s[i] == ']' {
+				depth--
+				if depth == 0 {
+					break
+				}
+			} else if s[i] == '"' {
+				i++
+				for ; i < len(s); i++ {
+					if s[i] == '\\' {
+						i++
+					} else if s[i] == '"' {
+						break
+					}
+				}
+			}
+		}
+		if depth == 0 && i == len(s)-1 {
+			return parseOrExpr(s[1 : len(s)-1])
+		}
+	}
+	return parseCondition(s)
+}
+
+func parseCondition(condStr string) (*queryExpr, bool) {
+	condStr = trim(condStr)
+	if condStr == "" {
+		return nil, false
+	}
+	j := -1
+	depth := 0
+	vesc := false
+	for i := 0; i < len(condStr); i++ {
+		if depth == 0 && j == -1 {
+			switch condStr[i] {
+			case '!', '=', '<', '>', '%':
+				j = i
+				continue
+			}
+		}
+		if condStr[i] == '\\' {
+			i++
+		} else if condStr[i] == '(' || condStr[i] == '[' {
+			depth++
+		} else if condStr[i] == ')' || condStr[i] == ']' {
+			if depth > 0 {
+				depth--
+			}
+		} else if condStr[i] == '"' {
+			i++
+			for ; i < len(condStr); i++ {
+				if condStr[i] == '\\' {
+					vesc = true
+					i++
+				} else if condStr[i] == '"' {
+					break
+				}
+			}
+		}
+	}
+	var path, op, value string
+	if j >= 0 {
+		path = trim(condStr[:j])
+		valPart := trim(condStr[j:])
+		var opsz int
+		switch {
+		case len(valPart) == 1:
+			opsz = 1
+		case valPart[0] == '!' && len(valPart) > 1 && valPart[1] == '=':
+			opsz = 2
+		case valPart[0] == '!' && len(valPart) > 1 && valPart[1] == '%':
+			opsz = 2
+		case valPart[0] == '<' && len(valPart) > 1 && valPart[1] == '=':
+			opsz = 2
+		case valPart[0] == '>' && len(valPart) > 1 && valPart[1] == '=':
+			opsz = 2
+		case valPart[0] == '=' && len(valPart) > 1 && valPart[1] == '=':
+			valPart = valPart[1:]
+			opsz = 1
+		case valPart[0] == '<':
+			opsz = 1
+		case valPart[0] == '>':
+			opsz = 1
+		case valPart[0] == '=':
+			opsz = 1
+		case valPart[0] == '%':
+			opsz = 1
+		}
+		if opsz > len(valPart) {
+			opsz = len(valPart)
+		}
+		op = valPart[:opsz]
+		value = trim(valPart[opsz:])
+	} else {
+		path = trim(condStr)
+	}
+
+	if len(value) >= 2 && value[0] == '"' && value[len(value)-1] == '"' {
+		value = value[1 : len(value)-1]
+		if vesc {
+			value = unescape(value)
+		}
+	}
+	return &queryExpr{
+		op: queryOpNone,
+		cond: queryCond{
+			path:  path,
+			op:    op,
+			value: value,
+		},
+	}, true
 }
 
 func trim(s string) string {
@@ -1441,7 +1739,16 @@ func nullish(t Result) bool {
 }
 
 func queryMatches(rp *arrayPathResult, value Result) bool {
-	rpv := rp.query.value
+	c := queryCond{
+		path:  rp.query.path,
+		op:    rp.query.op,
+		value: rp.query.value,
+	}
+	return matchCondition(&c, value)
+}
+
+func matchCondition(c *queryCond, value Result) bool {
+	rpv := c.value
 	if len(rpv) > 0 {
 		if rpv[0] == '~' {
 			// convert to bool
@@ -1473,7 +1780,7 @@ func queryMatches(rp *arrayPathResult, value Result) bool {
 	if !value.Exists() {
 		return false
 	}
-	if rp.query.op == "" {
+	if c.op == "" {
 		// the query is only looking for existence, such as:
 		//   friends.#(name)
 		// which makes sure that the array "friends" has an element of
@@ -1482,7 +1789,7 @@ func queryMatches(rp *arrayPathResult, value Result) bool {
 	}
 	switch value.Type {
 	case String:
-		switch rp.query.op {
+		switch c.op {
 		case "=":
 			return value.Str == rpv
 		case "!=":
@@ -1502,7 +1809,7 @@ func queryMatches(rp *arrayPathResult, value Result) bool {
 		}
 	case Number:
 		rpvn, _ := strconv.ParseFloat(rpv, 64)
-		switch rp.query.op {
+		switch c.op {
 		case "=":
 			return value.Num == rpvn
 		case "!=":
@@ -1517,7 +1824,7 @@ func queryMatches(rp *arrayPathResult, value Result) bool {
 			return value.Num >= rpvn
 		}
 	case True:
-		switch rp.query.op {
+		switch c.op {
 		case "=":
 			return rpv == "true"
 		case "!=":
@@ -1528,7 +1835,7 @@ func queryMatches(rp *arrayPathResult, value Result) bool {
 			return true
 		}
 	case False:
-		switch rp.query.op {
+		switch c.op {
 		case "=":
 			return rpv == "false"
 		case "!=":
@@ -1574,15 +1881,21 @@ func parseArray(c *parseContext, i int, path string) (int, bool) {
 		fillIndex(c.json, &tmp)
 		parentIndex := tmp.value.Index
 		var res Result
-		if qval.Type == JSON {
-			res = qval.Get(rp.query.path)
+		var matched bool
+		if rp.query.expr != nil {
+			matched = rp.query.expr.eval(qval)
 		} else {
-			if rp.query.path != "" {
-				return false
+			if qval.Type == JSON {
+				res = qval.Get(rp.query.path)
+			} else {
+				if rp.query.path != "" {
+					return false
+				}
+				res = qval
 			}
-			res = qval
+			matched = queryMatches(&rp, res)
 		}
-		if queryMatches(&rp, res) {
+		if matched {
 			if rp.more {
 				left, right, ok := splitPossiblePipe(rp.path)
 				if ok {

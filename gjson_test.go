@@ -2833,3 +2833,140 @@ func TestPathRev(t *testing.T) {
 	// Does not matter the result. Must not panic.
 	Get(doc, "b:").Path(doc)
 }
+
+func TestIssue398(t *testing.T) {
+	json := `[
+		{"name": "Acme1", "type": "company", "country": "Australia"},
+		{"name": "John", "type": "user", "country": "Australia"},
+		{"name": "David", "type": "user", "country": "New Zealand"}
+	]`
+
+	// AND operator: get all users in Australia
+	assert(t, Get(json, `#(country=="Australia" && type=="user")#.name`).String() == `["John"]`)
+	assert(t, Get(json, `#(country=="Australia" && type=="user").name`).String() == `John`)
+
+	// OR operator: get all users in Australia or New Zealand
+	assert(t, Get(json, `#(country=="Australia" || country=="New Zealand")#.name`).String() == `["Acme1","John","David"]`)
+
+	// AND with parenthesized OR
+	assert(t, Get(json, `#(type=="user" && (country=="Australia" || country=="New Zealand"))#.name`).String() == `["John","David"]`)
+
+	// Non-matching combinations
+	assert(t, Get(json, `#(type=="company" && country=="New Zealand")#.name`).String() == `[]`)
+	assert(t, !Get(json, `#(type=="company" && country=="New Zealand")`).Exists())
+}
+
+func TestQueryLogicalOperators(t *testing.T) {
+	json := `[
+		{"name": "Acme1", "type": "company", "country": "Australia"},
+		{"name": "John", "type": "user", "country": "Australia"},
+		{"name": "David", "type": "user", "country": "New Zealand"}
+	]`
+
+	// Precedence: && has higher precedence than ||
+	// a==1 || b==2 && c==3  =>  a==1 || (b==2 && c==3)
+	jsonPrecedence := `[
+		{"id": 1, "a": 0, "b": 2, "c": 3},
+		{"id": 2, "a": 0, "b": 2, "c": 0},
+		{"id": 3, "a": 1, "b": 0, "c": 0},
+		{"id": 4, "a": 0, "b": 0, "c": 0}
+	]`
+	assert(t, Get(jsonPrecedence, `#(a==1 || b==2 && c==3)#.id`).String() == `[1,3]`)
+
+	// a==1 && b==2 || c==3  =>  (a==1 && b==2) || c==3
+	jsonPrecedence2 := `[
+		{"id": 1, "a": 1, "b": 2, "c": 0},
+		{"id": 2, "a": 1, "b": 0, "c": 0},
+		{"id": 3, "a": 0, "b": 0, "c": 3},
+		{"id": 4, "a": 0, "b": 0, "c": 0}
+	]`
+	assert(t, Get(jsonPrecedence2, `#(a==1 && b==2 || c==3)#.id`).String() == `[1,3]`)
+
+	// Parentheses overriding precedence: (a==1 || b==2) && c==3
+	assert(t, Get(jsonPrecedence, `#((a==1 || b==2) && c==3)#.id`).String() == `[1]`)
+
+	// Multiple chained AND / OR
+	jsonMulti := `[
+		{"id": 1, "a": 1, "b": 2, "c": 3, "d": 4},
+		{"id": 2, "a": 1, "b": 2, "c": 3, "d": 0},
+		{"id": 3, "a": 1, "b": 2, "c": 0, "d": 0},
+		{"id": 4, "a": 9, "b": 9, "c": 9, "d": 9}
+	]`
+	assert(t, Get(jsonMulti, `#(a==1 && b==2 && c==3 && d==4)#.id`).String() == `[1]`)
+	assert(t, Get(jsonMulti, `#(a==9 || b==9 || c==9)#.id`).String() == `[4]`)
+	assert(t, Get(jsonMulti, `#((a==1 || a==9) && (d==0 || d==9))#.id`).String() == `[2,3,4]`)
+
+	// Numeric and comparison operators: <, <=, >, >=, !=
+	jsonComp := `[
+		{"name": "Alice", "age": 15},
+		{"name": "Bob", "age": 25},
+		{"name": "Charlie", "age": 35},
+		{"name": "Diana", "age": 65}
+	]`
+	assert(t, Get(jsonComp, `#(age>=18 && age<=30)#.name`).String() == `["Bob"]`)
+	assert(t, Get(jsonComp, `#(age<20 || age>60)#.name`).String() == `["Alice","Diana"]`)
+	assert(t, Get(jsonComp, `#(age!=25 && age!=35)#.name`).String() == `["Alice","Diana"]`)
+
+	// Pattern matching: % and !%
+	jsonPattern := `[
+		{"name": "Apple", "cat": "fruit"},
+		{"name": "Avocado", "cat": "fruit"},
+		{"name": "Banana", "cat": "fruit"},
+		{"name": "Asparagus", "cat": "vegetable"}
+	]`
+	assert(t, Get(jsonPattern, `#(name%"A*" && cat=="fruit")#.name`).String() == `["Apple","Avocado"]`)
+	assert(t, Get(jsonPattern, `#(name!%"A*" || cat=="vegetable")#.name`).String() == `["Banana","Asparagus"]`)
+
+	// Boolean and null values
+	jsonBool := `[
+		{"id": 1, "active": true, "deleted": false},
+		{"id": 2, "active": false, "deleted": true},
+		{"id": 3, "active": true, "deleted": true}
+	]`
+	assert(t, Get(jsonBool, `#(active==true && deleted==false)#.id`).String() == `[1]`)
+	assert(t, Get(jsonBool, `#(active==false || deleted==false)#.id`).String() == `[1,2]`)
+
+	// Tilde conversions
+	jsonTilde := `[
+		{"id": 1, "val": "true", "opt": 10},
+		{"id": 2, "val": false, "opt": null},
+		{"id": 3, "val": null}
+	]`
+	assert(t, Get(jsonTilde, `#(val==~true && opt!=~null)#.id`).String() == `[1]`)
+	assert(t, Get(jsonTilde, `#(val==~false || opt==~null)#.id`).String() == `[2,3]`)
+
+	// Primitive arrays
+	jsonPrim := `["apple", "banana", "cherry", "avocado", "berry"]`
+	assert(t, Get(jsonPrim, `#(%"a*" && %"*e")#`).String() == `["apple"]`)
+	assert(t, Get(jsonPrim, `#(=="apple" || =="cherry")#`).String() == `["apple","cherry"]`)
+
+	// Nested subqueries with logical operators
+	jsonNested := `{
+		"services": [
+			{"name": "auth", "roles": ["admin", "user"], "tier": "gold"},
+			{"name": "billing", "roles": ["finance"], "tier": "gold"},
+			{"name": "logging", "roles": ["admin"], "tier": "silver"}
+		]
+	}`
+	assert(t, Get(jsonNested, `services.#(roles.#(=="admin") && tier=="gold")#.name`).String() == `["auth"]`)
+	assert(t, Get(jsonNested, `services.#(roles.#(=="finance") || tier=="silver")#.name`).String() == `["billing","logging"]`)
+
+	// String literals containing logical operators and parens
+	jsonStr := `[
+		{"title": "cats && dogs", "kind": "A"},
+		{"title": "cats || dogs", "kind": "B"},
+		{"title": "(secret)", "kind": "C"}
+	]`
+	assert(t, Get(jsonStr, `#(title=="cats && dogs" && kind=="A")#.title`).String() == `["cats && dogs"]`)
+	assert(t, Get(jsonStr, `#(title=="cats || dogs" || title=="(secret)")#.title`).String() == `["cats || dogs","(secret)"]`)
+
+	// Whitespace variations
+	assert(t, Get(json, `#(   country == "Australia"    &&    type == "user"   )#.name`).String() == `["John"]`)
+	assert(t, Get(json, `#(country=="Australia"&&type=="user")#.name`).String() == `["John"]`)
+	assert(t, Get(json, `#(country=="Australia"||country=="New Zealand")#.name`).String() == `["Acme1","John","David"]`)
+
+	// First match vs all matches with path suffix
+	assert(t, Get(json, `#(type=="user" && country=="Australia").name`).String() == `John`)
+	assert(t, Get(json, `#(type=="user" && country=="Australia")#.name`).String() == `["John"]`)
+}
+
