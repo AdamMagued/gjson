@@ -357,7 +357,17 @@ func (t Result) Map() map[string]Result {
 // Get searches result for the specified path.
 // The result should be a JSON array or object.
 func (t Result) Get(path string) Result {
-	r := Get(t.Raw, path)
+	return t.getWithOptions(path, ModifiersDisabled())
+}
+
+// GetWithOptions searches result for the specified path with custom options.
+func (t Result) GetWithOptions(path string, opts *Options, optFuncs ...Option) Result {
+	resolved := resolveOptions(opts, optFuncs)
+	return t.getWithOptions(path, resolved.DisableModifiers)
+}
+
+func (t Result) getWithOptions(path string, disableModifiers bool) Result {
+	r := getWithOptions(t.Raw, path, disableModifiers)
 	if r.Indexes != nil {
 		for i := 0; i < len(r.Indexes); i++ {
 			r.Indexes[i] += t.Index
@@ -808,7 +818,7 @@ type arrayPathResult struct {
 	}
 }
 
-func parseArrayPath(path string) (r arrayPathResult) {
+func parseArrayPath(path string, disableModifiers bool) (r arrayPathResult) {
 	for i := 0; i < len(path); i++ {
 		if path[i] == '|' {
 			r.part = path[:i]
@@ -818,7 +828,7 @@ func parseArrayPath(path string) (r arrayPathResult) {
 		}
 		if path[i] == '.' {
 			r.part = path[:i]
-			if !r.arrch && i < len(path)-1 && isDotPiperChar(path[i+1:]) {
+			if !r.arrch && i < len(path)-1 && isDotPiperChar(path[i+1:], disableModifiers) {
 				r.pipe = path[i+1:]
 				r.piped = true
 			} else {
@@ -988,8 +998,8 @@ right:
 }
 
 // peek at the next byte and see if it's a '@', '[', or '{'.
-func isDotPiperChar(s string) bool {
-	if modifiersAreDisabled {
+func isDotPiperChar(s string, disableModifiers bool) bool {
+	if disableModifiers {
 		return false
 	}
 	c := s[0]
@@ -1015,7 +1025,7 @@ type objectPathResult struct {
 	more  bool
 }
 
-func parseObjectPath(path string) (r objectPathResult) {
+func parseObjectPath(path string, disableModifiers bool) (r objectPathResult) {
 	for i := 0; i < len(path); i++ {
 		if path[i] == '|' {
 			r.part = path[:i]
@@ -1025,7 +1035,7 @@ func parseObjectPath(path string) (r objectPathResult) {
 		}
 		if path[i] == '.' {
 			r.part = path[:i]
-			if i < len(path)-1 && isDotPiperChar(path[i+1:]) {
+			if i < len(path)-1 && isDotPiperChar(path[i+1:], disableModifiers) {
 				r.pipe = path[i+1:]
 				r.piped = true
 			} else {
@@ -1055,7 +1065,7 @@ func parseObjectPath(path string) (r objectPathResult) {
 						continue
 					} else if path[i] == '.' {
 						r.part = string(epart)
-						if i < len(path)-1 && isDotPiperChar(path[i+1:]) {
+						if i < len(path)-1 && isDotPiperChar(path[i+1:], disableModifiers) {
 							r.pipe = path[i+1:]
 							r.piped = true
 						} else {
@@ -1232,7 +1242,7 @@ func parseSquash(json string, i int) (int, string) {
 func parseObject(c *parseContext, i int, path string) (int, bool) {
 	var pmatch, kesc, vesc, ok, hit bool
 	var key, val string
-	rp := parseObjectPath(path)
+	rp := parseObjectPath(path, c.disableModifiers)
 	if !rp.more && rp.piped {
 		c.pipe = rp.pipe
 		c.piped = true
@@ -1549,7 +1559,7 @@ func parseArray(c *parseContext, i int, path string) (int, bool) {
 	var partidx int
 	var multires []byte
 	var queryIndexes []int
-	rp := parseArrayPath(path)
+	rp := parseArrayPath(path, c.disableModifiers)
 	if !rp.arrch {
 		n, ok := parseUint(rp.part)
 		if !ok {
@@ -1571,11 +1581,12 @@ func parseArray(c *parseContext, i int, path string) (int, bool) {
 		}
 		var tmp parseContext
 		tmp.value = qval
+		tmp.disableModifiers = c.disableModifiers
 		fillIndex(c.json, &tmp)
 		parentIndex := tmp.value.Index
 		var res Result
 		if qval.Type == JSON {
-			res = qval.Get(rp.query.path)
+			res = qval.getWithOptions(rp.query.path, c.disableModifiers)
 		} else {
 			if rp.query.path != "" {
 				return false
@@ -1590,7 +1601,7 @@ func parseArray(c *parseContext, i int, path string) (int, bool) {
 					c.pipe = right
 					c.piped = true
 				}
-				res = qval.Get(rp.path)
+				res = qval.getWithOptions(rp.path, c.disableModifiers)
 			} else {
 				res = qval
 			}
@@ -1776,7 +1787,7 @@ func parseArray(c *parseContext, i int, path string) (int, bool) {
 							if idx < len(c.json) && c.json[idx] != ']' {
 								_, res, ok := parseAny(c.json, idx, true)
 								if ok {
-									res := res.Get(rp.alogkey)
+									res := res.getWithOptions(rp.alogkey, c.disableModifiers)
 									if res.Exists() {
 										if k > 0 {
 											jsons = append(jsons, ',')
@@ -2072,8 +2083,24 @@ func SetEscapeHTML(escapeHTML bool) {
 	disableEscapeHTML.Store(!escapeHTML)
 }
 
-func escapeHTML() bool {
+// SetDisableEscapeHTML disables or enables automatic escaping of certain
+// HTML characters when encoding to JSON.
+func SetDisableEscapeHTML(disabled bool) {
+	disableEscapeHTML.Store(disabled)
+}
+
+// EscapeHTML reports whether automatic HTML escaping is enabled.
+func EscapeHTML() bool {
 	return !disableEscapeHTML.Load()
+}
+
+// EscapeHTMLDisabled reports whether automatic HTML escaping is disabled.
+func EscapeHTMLDisabled() bool {
+	return disableEscapeHTML.Load()
+}
+
+func escapeHTML() bool {
+	return EscapeHTML()
 }
 
 // AppendJSONString is a convenience function that converts the provided string
@@ -2133,12 +2160,13 @@ func AppendJSONString(dst []byte, s string) []byte {
 }
 
 type parseContext struct {
-	json  string
-	value Result
-	pipe  string
-	piped bool
-	calcd bool
-	lines bool
+	json             string
+	value            Result
+	pipe             string
+	piped            bool
+	calcd            bool
+	lines            bool
+	disableModifiers bool
 }
 
 // Get searches json for the specified path.
@@ -2175,13 +2203,23 @@ type parseContext struct {
 // If you are consuming JSON from an unpredictable source then you may want to
 // use the Valid function first.
 func Get(json, path string) Result {
+	return getWithOptions(json, path, ModifiersDisabled())
+}
+
+// GetWithOptions searches json for the specified path with custom options.
+func GetWithOptions(json, path string, opts *Options, optFuncs ...Option) Result {
+	resolved := resolveOptions(opts, optFuncs)
+	return getWithOptions(json, path, resolved.DisableModifiers)
+}
+
+func getWithOptions(json, path string, disableModifiers bool) Result {
 	if len(path) > 1 {
-		if (path[0] == '@' && !modifiersAreDisabled) || path[0] == '!' {
+		if (path[0] == '@' && !disableModifiers) || path[0] == '!' {
 			// possible modifier
 			var ok bool
 			var npath string
 			var rjson string
-			if path[0] == '@' && !modifiersAreDisabled {
+			if path[0] == '@' && !disableModifiers {
 				npath, rjson, ok = execModifier(json, path)
 			} else if path[0] == '!' {
 				npath, rjson, ok = execStatic(path)
@@ -2189,7 +2227,7 @@ func Get(json, path string) Result {
 			if ok {
 				path = npath
 				if len(path) > 0 && (path[0] == '|' || path[0] == '.') {
-					res := Get(rjson, path[1:])
+					res := getWithOptions(rjson, path[1:], disableModifiers)
 					res.Index = 0
 					res.Indexes = nil
 					return res
@@ -2209,7 +2247,7 @@ func Get(json, path string) Result {
 					b = append(b, kind)
 					var i int
 					for _, sub := range subs {
-						res := Get(json, sub.path)
+						res := getWithOptions(json, sub.path, disableModifiers)
 						if res.Exists() {
 							if i > 0 {
 								b = append(b, ',')
@@ -2249,7 +2287,7 @@ func Get(json, path string) Result {
 					res.Raw = string(b)
 					res.Type = JSON
 					if len(path) > 0 {
-						res = res.Get(path[1:])
+						res = res.getWithOptions(path[1:], disableModifiers)
 					}
 					res.Index = 0
 					return res
@@ -2258,7 +2296,7 @@ func Get(json, path string) Result {
 		}
 	}
 	var i int
-	var c = &parseContext{json: json}
+	var c = &parseContext{json: json, disableModifiers: disableModifiers}
 	if len(path) >= 2 && path[0] == '.' && path[1] == '.' {
 		c.lines = true
 		parseArray(c, 0, path[2:])
@@ -2277,7 +2315,7 @@ func Get(json, path string) Result {
 		}
 	}
 	if c.piped {
-		res := c.value.Get(c.pipe)
+		res := c.value.getWithOptions(c.pipe, disableModifiers)
 		res.Index = 0
 		return res
 	}
@@ -2288,7 +2326,13 @@ func Get(json, path string) Result {
 // GetBytes searches json for the specified path.
 // If working with bytes, this method preferred over Get(string(data), path)
 func GetBytes(json []byte, path string) Result {
-	return getBytes(json, path)
+	return getBytesWithOptions(json, path, ModifiersDisabled())
+}
+
+// GetBytesWithOptions searches json for the specified path with custom options.
+func GetBytesWithOptions(json []byte, path string, opts *Options, optFuncs ...Option) Result {
+	resolved := resolveOptions(opts, optFuncs)
+	return getBytesWithOptions(json, path, resolved.DisableModifiers)
 }
 
 // runeit returns the rune from the the \uXXXX
@@ -2499,9 +2543,14 @@ func parseAny(json string, i int, hit bool) (int, Result, bool) {
 // The return value is a Result array where the number of items
 // will be equal to the number of input paths.
 func GetMany(json string, path ...string) []Result {
+	return GetManyWithOptions(json, nil, path...)
+}
+
+// GetManyWithOptions searches json for multiple paths with custom options.
+func GetManyWithOptions(json string, opts *Options, path ...string) []Result {
 	res := make([]Result, len(path))
-	for i, path := range path {
-		res[i] = Get(json, path)
+	for i, p := range path {
+		res[i] = GetWithOptions(json, p, opts)
 	}
 	return res
 }
@@ -2510,9 +2559,14 @@ func GetMany(json string, path ...string) []Result {
 // The return value is a Result array where the number of items
 // will be equal to the number of input paths.
 func GetManyBytes(json []byte, path ...string) []Result {
+	return GetManyBytesWithOptions(json, nil, path...)
+}
+
+// GetManyBytesWithOptions searches json for multiple paths with custom options.
+func GetManyBytesWithOptions(json []byte, opts *Options, path ...string) []Result {
 	res := make([]Result, len(path))
-	for i, path := range path {
-		res[i] = GetBytes(json, path)
+	for i, p := range path {
+		res[i] = GetBytesWithOptions(json, p, opts)
 	}
 	return res
 }
@@ -2972,13 +3026,78 @@ func unwrap(json string) string {
 	return json
 }
 
-// Deprecated: Modifiers can no longer be disabled at runtime. To disable
-// modifiers use the build flag:
+// Deprecated: Modifiers should be disabled at runtime using SetDisableModifiers()
+// or SetModifiers(), or at build time using:
 //
 //	-ldflags="-X 'github.com/tidwall/gjson.disableModifiers=true'"
 var DisableModifiers = false
-var disableModifiers = "false"                        // ldflag ("true")
-var modifiersAreDisabled = disableModifiers == "true" // usable feature bool
+var disableModifiers = "false" // ldflag ("true")
+var modifiersDisabled atomic.Bool
+
+// SetDisableModifiers disables or enables the modifier syntax safely at runtime.
+func SetDisableModifiers(disabled bool) {
+	modifiersDisabled.Store(disabled)
+}
+
+// SetModifiers enables or disables the modifier syntax safely at runtime.
+func SetModifiers(enabled bool) {
+	modifiersDisabled.Store(!enabled)
+}
+
+// ModifiersDisabled reports whether modifier syntax is disabled.
+func ModifiersDisabled() bool {
+	return modifiersDisabled.Load()
+}
+
+// Options specifies execution options for parsing and queries.
+type Options struct {
+	DisableModifiers bool
+}
+
+// Option configures an Options value.
+type Option func(*Options)
+
+// WithDisableModifiers configures whether modifier syntax is disabled for queries.
+func WithDisableModifiers(disabled bool) Option {
+	return func(opts *Options) {
+		opts.DisableModifiers = disabled
+	}
+}
+
+// WithModifiers configures whether modifier syntax is enabled for queries.
+func WithModifiers(enabled bool) Option {
+	return func(opts *Options) {
+		opts.DisableModifiers = !enabled
+	}
+}
+
+// NewOptions creates an Options instance with functional options applied.
+func NewOptions(opts ...Option) *Options {
+	options := &Options{
+		DisableModifiers: ModifiersDisabled(),
+	}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(options)
+		}
+	}
+	return options
+}
+
+func resolveOptions(opts *Options, optFuncs []Option) Options {
+	var resolved Options
+	if opts != nil {
+		resolved = *opts
+	} else {
+		resolved.DisableModifiers = ModifiersDisabled()
+	}
+	for _, fn := range optFuncs {
+		if fn != nil {
+			fn(&resolved)
+		}
+	}
+	return resolved
+}
 
 var stockModifiers map[string]func(json, arg string) string
 var userModifiers map[string]func(json, arg string) string
@@ -3001,6 +3120,9 @@ func init() {
 		"dig":     modDig,
 	}
 	userModifiers = map[string]func(json, arg string) string{}
+	if disableModifiers == "true" {
+		modifiersDisabled.Store(true)
+	}
 }
 
 // AddModifier binds a custom modifier command to the GJSON syntax.
@@ -3392,10 +3514,14 @@ type sliceHeader struct {
 // results as uniquely allocated data. This operation is intended to minimize
 // copies and allocations for the large json string->[]byte.
 func getBytes(json []byte, path string) Result {
+	return getBytesWithOptions(json, path, ModifiersDisabled())
+}
+
+func getBytesWithOptions(json []byte, path string, disableModifiers bool) Result {
 	var result Result
 	if json != nil {
 		// unsafe cast to string
-		result = Get(*(*string)(unsafe.Pointer(&json)), path)
+		result = getWithOptions(*(*string)(unsafe.Pointer(&json)), path, disableModifiers)
 		// safely get the string headers
 		rawhi := *(*stringHeader)(unsafe.Pointer(&result.Raw))
 		strhi := *(*stringHeader)(unsafe.Pointer(&result.Str))
@@ -3558,6 +3684,16 @@ func (t Result) Paths(json string) []string {
 // when the Result came from a path that contained a multipath, modifier,
 // or a nested query.
 func (t Result) Path(json string) string {
+	return t.pathWithOptions(json, ModifiersDisabled())
+}
+
+// PathWithOptions returns the path to the result within the original JSON using custom options.
+func (t Result) PathWithOptions(json string, opts *Options, optFuncs ...Option) string {
+	resolved := resolveOptions(opts, optFuncs)
+	return t.pathWithOptions(json, resolved.DisableModifiers)
+}
+
+func (t Result) pathWithOptions(json string, disableModifiers bool) string {
 	var path []byte
 	var comps []string // raw components
 	i := t.Index - 1
@@ -3617,7 +3753,7 @@ func (t Result) Path(json string) string {
 		}
 	}
 	if len(comps) == 0 {
-		if modifiersAreDisabled {
+		if disableModifiers {
 			goto fail
 		}
 		return "@this"

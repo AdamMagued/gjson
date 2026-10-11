@@ -10,6 +10,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -2832,4 +2833,222 @@ func TestPathRev(t *testing.T) {
 	doc := `{"b:"2}`
 	// Does not matter the result. Must not panic.
 	Get(doc, "b:").Path(doc)
+}
+
+func TestModifierOptions(t *testing.T) {
+	jsonDoc := `{"name":"Tom Anderson","age":37,"arr":[1,2,3],"@pretty":"literal"}`
+
+	// Default behavior: modifiers enabled
+	assert(t, Get(jsonDoc, "@this.name").String() == "Tom Anderson")
+	assert(t, Get(jsonDoc, "arr|@reverse.0").Int() == 3)
+	assert(t, Get(jsonDoc, "@pretty").String() != "literal")
+
+	// Options struct with DisableModifiers: true
+	optsDisabled := &Options{DisableModifiers: true}
+	assert(t, GetWithOptions(jsonDoc, "@this.name", optsDisabled).String() == "")
+	assert(t, GetWithOptions(jsonDoc, "@pretty", optsDisabled).String() == "literal")
+	assert(t, GetWithOptions(jsonDoc, "arr|@reverse", optsDisabled).String() == "")
+
+	// Functional options WithDisableModifiers
+	assert(t, GetWithOptions(jsonDoc, "@pretty", nil, WithDisableModifiers(true)).String() == "literal")
+	assert(t, GetWithOptions(jsonDoc, "@pretty", nil, WithDisableModifiers(false)).String() != "literal")
+	assert(t, GetWithOptions(jsonDoc, "@pretty", nil, WithModifiers(false)).String() == "literal")
+	assert(t, GetWithOptions(jsonDoc, "@pretty", nil, WithModifiers(true)).String() != "literal")
+
+	// GetBytesWithOptions
+	byteDoc := []byte(jsonDoc)
+	assert(t, GetBytesWithOptions(byteDoc, "@pretty", optsDisabled).String() == "literal")
+	assert(t, GetBytesWithOptions(byteDoc, "@pretty", &Options{DisableModifiers: false}).String() != "literal")
+
+	// GetManyWithOptions and GetManyBytesWithOptions
+	results := GetManyWithOptions(jsonDoc, optsDisabled, "@pretty", "name")
+	assert(t, len(results) == 2)
+	assert(t, results[0].String() == "literal")
+	assert(t, results[1].String() == "Tom Anderson")
+
+	byteResults := GetManyBytesWithOptions(byteDoc, optsDisabled, "@pretty", "name")
+	assert(t, len(byteResults) == 2)
+	assert(t, byteResults[0].String() == "literal")
+	assert(t, byteResults[1].String() == "Tom Anderson")
+
+	// Result.GetWithOptions
+	res := Parse(jsonDoc)
+	assert(t, res.GetWithOptions("@pretty", optsDisabled).String() == "literal")
+	assert(t, res.GetWithOptions("@pretty", &Options{DisableModifiers: false}).String() != "literal")
+
+	// Result.PathWithOptions
+	assert(t, res.PathWithOptions(jsonDoc, optsDisabled) == "")
+	assert(t, res.PathWithOptions(jsonDoc, &Options{DisableModifiers: false}) == "@this")
+
+	// NewOptions helper
+	customOpts := NewOptions(WithDisableModifiers(true))
+	assert(t, customOpts.DisableModifiers)
+	customOptsEnabled := NewOptions(WithModifiers(true))
+	assert(t, !customOptsEnabled.DisableModifiers)
+
+	// Global modifiers switch
+	prevModsDisabled := ModifiersDisabled()
+	defer SetDisableModifiers(prevModsDisabled)
+
+	SetDisableModifiers(true)
+	assert(t, ModifiersDisabled())
+	assert(t, Get(jsonDoc, "@pretty").String() == "literal")
+
+	SetModifiers(true)
+	assert(t, !ModifiersDisabled())
+	assert(t, Get(jsonDoc, "@pretty").String() != "literal")
+
+	SetDisableModifiers(false)
+	assert(t, !ModifiersDisabled())
+
+	// Global escape HTML switch
+	prevEscapeDisabled := EscapeHTMLDisabled()
+	defer SetDisableEscapeHTML(prevEscapeDisabled)
+
+	SetEscapeHTML(true)
+	assert(t, EscapeHTML())
+	assert(t, !EscapeHTMLDisabled())
+	assert(t, string(AppendJSONString(nil, "<>&")) == "\"\\u003c\\u003e\\u0026\"")
+
+	SetDisableEscapeHTML(true)
+	assert(t, !EscapeHTML())
+	assert(t, EscapeHTMLDisabled())
+	assert(t, string(AppendJSONString(nil, "<>&")) == "\"<>&\"")
+
+	SetEscapeHTML(true)
+}
+
+func TestConcurrentOptionsRace(t *testing.T) {
+	jsonDoc := `{"name":"Tom Anderson","age":37,"arr":[1,2,3],"@pretty":"literal_pretty","@reverse":"literal_rev"}`
+	jsonBytes := []byte(jsonDoc)
+
+	const goroutines = 40
+	const iterations = 100
+
+	var wg sync.WaitGroup
+	wg.Add(goroutines)
+
+	for i := 0; i < goroutines; i++ {
+		disable := (i % 2) == 0
+		go func(disableMods bool) {
+			defer wg.Done()
+			opts := &Options{DisableModifiers: disableMods}
+
+			for j := 0; j < iterations; j++ {
+				r1 := GetWithOptions(jsonDoc, "@pretty", opts)
+				if disableMods {
+					if r1.String() != "literal_pretty" {
+						t.Errorf("expected literal_pretty, got %s", r1.String())
+						return
+					}
+				} else {
+					if r1.String() == "literal_pretty" {
+						t.Errorf("expected modifier pretty result, got literal")
+						return
+					}
+				}
+
+				r2 := GetBytesWithOptions(jsonBytes, "@pretty", nil, WithDisableModifiers(disableMods))
+				if disableMods {
+					if r2.String() != "literal_pretty" {
+						t.Errorf("expected literal_pretty for bytes, got %s", r2.String())
+						return
+					}
+				} else {
+					if r2.String() == "literal_pretty" {
+						t.Errorf("expected modifier pretty for bytes, got literal")
+						return
+					}
+				}
+
+				many := GetManyWithOptions(jsonDoc, opts, "@pretty", "name")
+				if len(many) != 2 || many[1].String() != "Tom Anderson" {
+					t.Errorf("unexpected GetManyWithOptions result: %v", many)
+					return
+				}
+
+				manyBytes := GetManyBytesWithOptions(jsonBytes, opts, "@pretty", "age")
+				if len(manyBytes) != 2 || manyBytes[1].Int() != 37 {
+					t.Errorf("unexpected GetManyBytesWithOptions result: %v", manyBytes)
+					return
+				}
+
+				parsed := Parse(jsonDoc)
+				pathRes := parsed.PathWithOptions(jsonDoc, opts)
+				if disableMods && pathRes != "" {
+					t.Errorf("expected empty path for disabled modifiers, got %s", pathRes)
+					return
+				} else if !disableMods && pathRes != "@this" {
+					t.Errorf("expected @this path for enabled modifiers, got %s", pathRes)
+					return
+				}
+			}
+		}(disable)
+	}
+
+	wg.Wait()
+}
+
+func TestConcurrentGlobalModifiersRace(t *testing.T) {
+	jsonDoc := `{"name":"Tom Anderson","age":37,"arr":[1,2,3],"@pretty":"literal_pretty"}`
+	jsonBytes := []byte(jsonDoc)
+
+	prev := ModifiersDisabled()
+	defer SetDisableModifiers(prev)
+
+	const goroutines = 20
+	const iterations = 50
+
+	var wg sync.WaitGroup
+	wg.Add(goroutines)
+
+	for i := 0; i < goroutines; i++ {
+		go func(id int) {
+			defer wg.Done()
+			for j := 0; j < iterations; j++ {
+				if id%4 == 0 {
+					SetDisableModifiers(j%2 == 0)
+				} else if id%4 == 1 {
+					SetModifiers(j%2 == 0)
+				} else {
+					_ = ModifiersDisabled()
+					_ = Get(jsonDoc, "@pretty")
+					_ = GetBytes(jsonBytes, "name")
+					_ = Parse(jsonDoc).Path(jsonDoc)
+				}
+			}
+		}(i)
+	}
+
+	wg.Wait()
+}
+
+func TestConcurrentEscapeHTMLRace(t *testing.T) {
+	prev := EscapeHTMLDisabled()
+	defer SetDisableEscapeHTML(prev)
+
+	const goroutines = 20
+	const iterations = 50
+
+	var wg sync.WaitGroup
+	wg.Add(goroutines)
+
+	for i := 0; i < goroutines; i++ {
+		go func(id int) {
+			defer wg.Done()
+			for j := 0; j < iterations; j++ {
+				if id%4 == 0 {
+					SetEscapeHTML(j%2 == 0)
+				} else if id%4 == 1 {
+					SetDisableEscapeHTML(j%2 == 0)
+				} else {
+					_ = EscapeHTML()
+					_ = EscapeHTMLDisabled()
+					_ = AppendJSONString(nil, "<hello&world>")
+				}
+			}
+		}(i)
+	}
+
+	wg.Wait()
 }
