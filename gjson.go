@@ -1967,12 +1967,14 @@ func parseSubSelectors(path string) (sels []subSelector, out string, ok bool) {
 	pushSel := func() {
 		var sel subSelector
 		if colon == 0 {
-			sel.path = path[start:i]
+			sel.path = strings.TrimSpace(path[start:i])
 		} else {
-			sel.name = path[start:colon]
-			sel.path = path[colon+1 : i]
+			sel.name = strings.TrimSpace(path[start:colon])
+			sel.path = strings.TrimSpace(path[colon+1 : i])
 		}
-		sels = append(sels, sel)
+		if sel.path != "" || sel.name != "" {
+			sels = append(sels, sel)
+		}
 		colon = 0
 		modifier = 0
 		start = i + 1

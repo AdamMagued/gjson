@@ -2833,3 +2833,28 @@ func TestPathRev(t *testing.T) {
 	// Does not matter the result. Must not panic.
 	Get(doc, "b:").Path(doc)
 }
+
+func TestMultilineSubSelectors(t *testing.T) {
+	json := `{
+		"name": {"first": "Tom", "last": "Anderson"},
+		"age": 37,
+		"children": ["Sara", "Alex"]
+	}`
+	
+	// Test multiline object subselectors with newlines, indentation, explicit keys, and trailing commas
+	query := `{
+	  name:name.last,
+	  age,
+	}`
+	res := Get(json, query)
+	assert(t, res.Raw == `{"name":"Anderson","age":37}`)
+
+	// Test multiline array subselectors with newlines and trailing commas
+	arrayQuery := `[
+	  name.first,
+	  age,
+	]`
+	resArr := Get(json, arrayQuery)
+	assert(t, resArr.Raw == `["Tom",37]`)
+}
+
