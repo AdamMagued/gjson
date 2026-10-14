@@ -1330,6 +1330,212 @@ func TestDuplicateKeys(t *testing.T) {
 	if !Valid(json) {
 		t.Fatal("should be valid")
 	}
+
+	t.Run("BasicDuplicateResolution", func(t *testing.T) {
+		input := `{"a":1,"a":2}`
+		if Get(input, "a").Int() != 1 {
+			t.Fatalf("expected Get(\"a\") to return 1, got %v", Get(input, "a").Int())
+		}
+		var count int
+		var keyStr string
+		var valInt int64
+		Parse(input).ForEach(func(key, value Result) bool {
+			count++
+			keyStr = key.String()
+			valInt = value.Int()
+			return true
+		})
+		if count != 1 {
+			t.Fatalf("expected ForEach to yield 1 item, got %d", count)
+		}
+		if keyStr != "a" || valInt != 1 {
+			t.Fatalf("expected (\"a\", 1), got (%q, %d)", keyStr, valInt)
+		}
+	})
+
+	t.Run("MultipleDuplicateKeys", func(t *testing.T) {
+		input := `{"a":1,"b":2,"a":3,"b":4,"c":5,"a":6}`
+		expected := map[string]int64{"a": 1, "b": 2, "c": 5}
+		expectedOrder := []string{"a", "b", "c"}
+
+		for k, v := range expected {
+			if Get(input, k).Int() != v {
+				t.Fatalf("expected Get(%q) to return %d, got %v", k, v, Get(input, k).Int())
+			}
+		}
+
+		var seenKeys []string
+		seenMap := make(map[string]int64)
+		Parse(input).ForEach(func(key, value Result) bool {
+			k := key.String()
+			seenKeys = append(seenKeys, k)
+			seenMap[k] = value.Int()
+			return true
+		})
+
+		if len(seenKeys) != len(expectedOrder) {
+			t.Fatalf("expected %d keys, got %d: %v", len(expectedOrder), len(seenKeys), seenKeys)
+		}
+		for i, k := range expectedOrder {
+			if seenKeys[i] != k {
+				t.Fatalf("expected key at index %d to be %q, got %q", i, k, seenKeys[i])
+			}
+			if seenMap[k] != expected[k] {
+				t.Fatalf("expected value for key %q to be %d, got %d", k, expected[k], seenMap[k])
+			}
+		}
+	})
+
+	t.Run("EscapedDuplicateKeys", func(t *testing.T) {
+		input := `{"\u0061":1,"a":2}`
+		if Get(input, "a").Int() != 1 {
+			t.Fatalf("expected Get(\"a\") to return 1, got %v", Get(input, "a").Int())
+		}
+		var count int
+		var valInt int64
+		Parse(input).ForEach(func(key, value Result) bool {
+			count++
+			valInt = value.Int()
+			return true
+		})
+		if count != 1 || valInt != 1 {
+			t.Fatalf("expected 1 item with value 1, got count=%d, val=%d", count, valInt)
+		}
+	})
+
+	t.Run("VariousValueTypes", func(t *testing.T) {
+		input := `{"k":"first","k":123,"k":true,"k":null,"k":{"x":1},"k":[1,2]}`
+		if Get(input, "k").String() != "first" {
+			t.Fatalf("expected 'first', got %q", Get(input, "k").String())
+		}
+		var count int
+		var valStr string
+		Parse(input).ForEach(func(key, value Result) bool {
+			count++
+			valStr = value.String()
+			return true
+		})
+		if count != 1 || valStr != "first" {
+			t.Fatalf("expected count 1 with value 'first', got count=%d val=%q", count, valStr)
+		}
+	})
+
+	t.Run("FalsyLiterals", func(t *testing.T) {
+		input := `{"f":false,"f":true,"n":null,"n":"defined"}`
+		if Get(input, "f").Bool() != false {
+			t.Fatal("expected Get(\"f\") to be false")
+		}
+		if Get(input, "n").Type != Null {
+			t.Fatal("expected Get(\"n\") to be Null")
+		}
+		var count int
+		Parse(input).ForEach(func(key, value Result) bool {
+			count++
+			if key.String() == "f" && value.Bool() != false {
+				t.Fatalf("expected f=false, got %v", value.Bool())
+			}
+			if key.String() == "n" && value.Type != Null {
+				t.Fatalf("expected n=Null, got %v", value.Type)
+			}
+			return true
+		})
+		if count != 2 {
+			t.Fatalf("expected count 2, got %d", count)
+		}
+	})
+
+	t.Run("EarlyTermination", func(t *testing.T) {
+		input := `{"a":1,"a":2,"b":3,"c":4}`
+		var count int
+		Parse(input).ForEach(func(key, value Result) bool {
+			count++
+			return false
+		})
+		if count != 1 {
+			t.Fatalf("expected count 1 on early termination, got %d", count)
+		}
+	})
+
+	t.Run("LargeObjectExceedingStackKeys", func(t *testing.T) {
+		var parts []string
+		for i := 0; i < 30; i++ {
+			parts = append(parts, fmt.Sprintf(`"k%d":%d`, i, i))
+			if i%3 == 0 {
+				parts = append(parts, fmt.Sprintf(`"k%d":%d`, i, i+1000))
+			}
+		}
+		input := "{" + strings.Join(parts, ",") + "}"
+		var count int
+		Parse(input).ForEach(func(key, value Result) bool {
+			k := key.String()
+			expectedVal := Get(input, k).Int()
+			if value.Int() != expectedVal {
+				t.Fatalf("key %q value %d != Get value %d", k, value.Int(), expectedVal)
+			}
+			count++
+			return true
+		})
+		if count != 30 {
+			t.Fatalf("expected 30 unique keys, got %d", count)
+		}
+	})
+
+	t.Run("NestedObjects", func(t *testing.T) {
+		input := `{"child":{"x":10,"x":20},"child":{"x":30}}`
+		if Get(input, "child.x").Int() != 10 {
+			t.Fatalf("expected Get(\"child.x\") to be 10, got %v", Get(input, "child.x").Int())
+		}
+		var outerCount int
+		Parse(input).ForEach(func(key, value Result) bool {
+			outerCount++
+			var innerCount int
+			value.ForEach(func(ikey, ivalue Result) bool {
+				innerCount++
+				if ikey.String() != "x" || ivalue.Int() != 10 {
+					t.Fatalf("expected (\"x\", 10), got (%q, %d)", ikey.String(), ivalue.Int())
+				}
+				return true
+			})
+			if innerCount != 1 {
+				t.Fatalf("expected innerCount 1, got %d", innerCount)
+			}
+			return true
+		})
+		if outerCount != 1 {
+			t.Fatalf("expected outerCount 1, got %d", outerCount)
+		}
+	})
+
+	t.Run("ArrayElementsPreserved", func(t *testing.T) {
+		input := `[1,1,2,2]`
+		var values []int64
+		Parse(input).ForEach(func(_, value Result) bool {
+			values = append(values, value.Int())
+			return true
+		})
+		if len(values) != 4 || values[0] != 1 || values[1] != 1 || values[2] != 2 || values[3] != 2 {
+			t.Fatalf("expected [1 1 2 2], got %v", values)
+		}
+	})
+
+	t.Run("IteratorsAndModifiers", func(t *testing.T) {
+		input := `{"a":1,"a":2,"b":3}`
+		keys := Get(input, "@keys").Array()
+		if len(keys) != 2 || keys[0].String() != "a" || keys[1].String() != "b" {
+			t.Fatalf("expected [\"a\", \"b\"], got %v", keys)
+		}
+		vals := Get(input, "@values").Array()
+		if len(vals) != 2 || vals[0].Int() != 1 || vals[1].Int() != 3 {
+			t.Fatalf("expected [1, 3], got %v", vals)
+		}
+		var iterKeys []string
+		for k := range Parse(input).Keys() {
+			iterKeys = append(iterKeys, k.String())
+		}
+		if len(iterKeys) != 2 || iterKeys[0] != "a" || iterKeys[1] != "b" {
+			t.Fatalf("expected [\"a\", \"b\"], got %v", iterKeys)
+		}
+	})
 }
 
 func TestArrayValues(t *testing.T) {

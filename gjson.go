@@ -268,6 +268,10 @@ func (t Result) IsBool() bool {
 // the value of each item. If the result is not a JSON array or object, the
 // iterator will pass back one value equal to the result.
 func (t Result) ForEach(iterator func(key, value Result) bool) {
+	t.forEach(iterator, true)
+}
+
+func (t Result) forEach(iterator func(key, value Result) bool, dedupe bool) {
 	if !t.Exists() {
 		return
 	}
@@ -299,7 +303,14 @@ func (t Result) ForEach(iterator func(key, value Result) bool) {
 	var vesc bool
 	var ok bool
 	var idx int
+	var stackKeys [16]string
+	var keys []string
+	var keyMap map[string]struct{}
+	if obj && dedupe {
+		keys = stackKeys[:0]
+	}
 	for ; i < len(json); i++ {
+		var duplicate bool
 		if obj {
 			if json[i] != '"' {
 				continue
@@ -316,6 +327,33 @@ func (t Result) ForEach(iterator func(key, value Result) bool) {
 			}
 			key.Raw = str
 			key.Index = s + t.Index
+			if dedupe {
+				if keyMap != nil {
+					if _, ok := keyMap[key.Str]; ok {
+						duplicate = true
+					} else {
+						keyMap[key.Str] = struct{}{}
+					}
+				} else {
+					for _, k := range keys {
+						if k == key.Str {
+							duplicate = true
+							break
+						}
+					}
+					if !duplicate {
+						if len(keys) < len(stackKeys) {
+							keys = append(keys, key.Str)
+						} else {
+							keyMap = make(map[string]struct{}, 32)
+							for _, k := range keys {
+								keyMap[k] = struct{}{}
+							}
+							keyMap[key.Str] = struct{}{}
+						}
+					}
+				}
+			}
 		} else {
 			key.Num += 1
 		}
@@ -326,9 +364,12 @@ func (t Result) ForEach(iterator func(key, value Result) bool) {
 			break
 		}
 		s := i
-		i, value, ok = parseAny(json, i, true)
+		i, value, ok = parseAny(json, i, !duplicate)
 		if !ok {
 			return
+		}
+		if duplicate {
+			continue
 		}
 		if t.Indexes != nil {
 			if idx < len(t.Indexes) {
@@ -2475,8 +2516,8 @@ func parseAny(json string, i int, hit bool) (int, Result, bool) {
 				case 'f':
 					res.Type = False
 				}
-				return i, res, true
 			}
+			return i, res, true
 		case '+', '-', '0', '1', '2', '3', '4', '5', '6', '7', '8', '9',
 			'i', 'I', 'N':
 			num = true
@@ -3115,10 +3156,10 @@ func modReverse(json, arg string) string {
 	}
 	if res.IsObject() {
 		var keyValues []Result
-		res.ForEach(func(key, value Result) bool {
+		res.forEach(func(key, value Result) bool {
 			keyValues = append(keyValues, key, value)
 			return true
-		})
+		}, false)
 		out := make([]byte, 0, len(json))
 		out = append(out, '{')
 		for i, j := len(keyValues)-2, 0; i >= 0; i, j = i-2, j+1 {
